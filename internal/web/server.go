@@ -2,6 +2,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"html"
@@ -10,10 +11,13 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/OptimumMeans/ShopifyDiscount/internal/ingest"
 	"github.com/OptimumMeans/ShopifyDiscount/internal/store"
 )
 
@@ -22,17 +26,19 @@ var assets embed.FS
 
 // Server renders dashboard pages from the store.
 type Server struct {
-	st  *store.Store
-	tpl *template.Template
+	st      *store.Store
+	tpl     *template.Template
+	dataDir string
 }
 
-// New builds a Server backed by st.
-func New(st *store.Store) (*Server, error) {
+// New builds a Server backed by st. dataDir is used to pull new snapshots from
+// the UI and to serve an optional logo at data/logo.* (git-ignored).
+func New(st *store.Store, dataDir string) (*Server, error) {
 	tpl, err := template.New("").Funcs(funcMap()).ParseFS(assets, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
-	return &Server{st: st, tpl: tpl}, nil
+	return &Server{st: st, tpl: tpl, dataDir: dataDir}, nil
 }
 
 // Handler returns the configured HTTP router.
@@ -41,6 +47,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("GET /code/{name}", s.handleCode)
+	mux.HandleFunc("POST /pull", s.handlePull)
+	mux.HandleFunc("GET /logo", s.handleLogo)
 	if static, err := fs.Sub(assets, "static"); err == nil {
 		mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static))))
 	}
@@ -53,6 +61,8 @@ type dashboardData struct {
 	Discounts   []store.DiscountView
 	Disappeared []string
 	Totals      totals
+	Flash       string
+	FlashErr    bool
 	ByStatus    []Segment
 	ByClass     []Segment
 	ByValueType []Segment
@@ -88,6 +98,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := dashboardData{Latest: latest}
+	if m := r.URL.Query().Get("msg"); m != "" {
+		data.Flash = m
+	}
+	if e := r.URL.Query().Get("err"); e != "" {
+		data.Flash, data.FlashErr = e, true
+	}
 	snaps, err := s.st.Snapshots()
 	if err != nil {
 		httpError(w, err)
@@ -213,6 +229,39 @@ func computeTotals(discs []store.DiscountView, gone []string) totals {
 		}
 	}
 	return t
+}
+
+// handlePull pulls a fresh snapshot from Shopify, then redirects back to the
+// dashboard with a status message.
+func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	res, err := ingest.Pull(ctx, s.st, s.dataDir)
+	if err != nil {
+		http.Redirect(w, r, "/?err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
+	}
+	var msg string
+	if res.Deduped {
+		msg = fmt.Sprintf("No changes since snapshot #%d — nothing new to record.", res.SnapshotID)
+	} else {
+		msg = fmt.Sprintf("Pulled snapshot #%d · %d codes · %+d uses since last.", res.SnapshotID, res.RowCount, res.TotalDelta)
+	}
+	http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+}
+
+// handleLogo serves an optional logo from the (git-ignored) data dir, so brand
+// assets never enter the repo or the binary.
+func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
+	for _, name := range []string{"logo.svg", "logo.png", "logo.jpg", "logo.jpeg", "logo.webp", "logo.gif"} {
+		p := filepath.Join(s.dataDir, name)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, p)
+			return
+		}
+	}
+	http.NotFound(w, r)
 }
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {

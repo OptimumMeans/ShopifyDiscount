@@ -8,11 +8,19 @@
 </head>
 <body>
 <header class="topbar">
-	<a class="brand" href="/">🏷️ Discount Archive</a>
+	<a class="brand" href="/">
+		<img src="/logo" alt="Discount Archive" class="brand-logo"
+		     onerror="this.style.display='none';this.nextElementSibling.style.display='inline'">
+		<span class="brand-text" style="display:none">Discount Archive</span>
+	</a>
 	<nav>
 		<a href="/">Dashboard</a>
 		<a href="/snapshots">Snapshots</a>
 	</nav>
+	<form class="pull-form" method="post" action="/pull"
+	      onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Pulling…';">
+		<button type="submit" class="pull-btn">Pull from Shopify</button>
+	</form>
 </header>
 <main>{{end}}
 

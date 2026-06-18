@@ -1,4 +1,5 @@
 {{template "top" .}}
+{{if .Flash}}<div class="flash{{if .FlashErr}} flash-err{{end}}">{{.Flash}}</div>{{end}}
 {{if not .Latest}}
 	<div class="empty">
 		<h1>No data yet</h1>

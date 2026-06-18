@@ -12,7 +12,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +22,7 @@ import (
 	"time"
 
 	"github.com/OptimumMeans/ShopifyDiscount/internal/csvimport"
+	"github.com/OptimumMeans/ShopifyDiscount/internal/ingest"
 	"github.com/OptimumMeans/ShopifyDiscount/internal/shopify"
 	"github.com/OptimumMeans/ShopifyDiscount/internal/store"
 	"github.com/OptimumMeans/ShopifyDiscount/internal/web"
@@ -196,91 +196,6 @@ func printDelta(st *store.Store, snapshotID int64) {
 	}
 }
 
-// shopifyCreds holds resolved Admin API credentials. ClientID/ClientSecret are
-// only needed for the `auth` OAuth flow; `pull` uses Token alone.
-type shopifyCreds struct {
-	Shop         string `json:"shop"`
-	Token        string `json:"token,omitempty"`
-	APIVersion   string `json:"apiVersion,omitempty"`
-	ClientID     string `json:"clientId,omitempty"`
-	ClientSecret string `json:"clientSecret,omitempty"`
-}
-
-// resolveCreds layers credentials: flags win, then env vars, then data/shopify.json.
-func resolveCreds(dataDir, shop, token, apiVersion string) (shopifyCreds, error) {
-	c := shopifyCreds{Shop: shop, Token: token, APIVersion: apiVersion}
-
-	// Config file (lowest precedence).
-	if raw, err := os.ReadFile(filepath.Join(dataDir, "shopify.json")); err == nil {
-		var fc shopifyCreds
-		if err := json.Unmarshal(raw, &fc); err != nil {
-			return c, fmt.Errorf("parsing data/shopify.json: %w", err)
-		}
-		c = firstNonEmpty(c, fc)
-	}
-	// Env vars (middle precedence).
-	c = firstNonEmpty(c, shopifyCreds{
-		Shop:       os.Getenv("SHOPIFY_SHOP"),
-		Token:      os.Getenv("SHOPIFY_ADMIN_TOKEN"),
-		APIVersion: os.Getenv("SHOPIFY_API_VERSION"),
-	})
-	if c.Shop == "" {
-		return c, fmt.Errorf("no shop domain found. Provide -shop, set SHOPIFY_SHOP, or add data/shopify.json")
-	}
-	if c.Token == "" {
-		return c, fmt.Errorf("no Admin API token found. Provide -token, set SHOPIFY_ADMIN_TOKEN, or add data/shopify.json")
-	}
-	return c, nil
-}
-
-// firstNonEmpty keeps base's fields, filling any empty ones from fallback.
-func firstNonEmpty(base, fallback shopifyCreds) shopifyCreds {
-	if base.Shop == "" {
-		base.Shop = fallback.Shop
-	}
-	if base.Token == "" {
-		base.Token = fallback.Token
-	}
-	if base.APIVersion == "" {
-		base.APIVersion = fallback.APIVersion
-	}
-	if base.ClientID == "" {
-		base.ClientID = fallback.ClientID
-	}
-	if base.ClientSecret == "" {
-		base.ClientSecret = fallback.ClientSecret
-	}
-	return base
-}
-
-// loadConfig reads data/shopify.json if present (empty creds if absent).
-func loadConfig(dataDir string) (shopifyCreds, error) {
-	var c shopifyCreds
-	raw, err := os.ReadFile(filepath.Join(dataDir, "shopify.json"))
-	if os.IsNotExist(err) {
-		return c, nil
-	}
-	if err != nil {
-		return c, err
-	}
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return c, fmt.Errorf("parsing data/shopify.json: %w", err)
-	}
-	return c, nil
-}
-
-// saveConfig writes creds to data/shopify.json with owner-only permissions,
-// merging over any existing file so unrelated fields are preserved.
-func saveConfig(dataDir string, c shopifyCreds) error {
-	existing, _ := loadConfig(dataDir)
-	merged := firstNonEmpty(c, existing)
-	raw, err := json.MarshalIndent(merged, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dataDir, "shopify.json"), raw, 0o600)
-}
-
 func cmdAuth(args []string) error {
 	fs := flag.NewFlagSet("auth", flag.ExitOnError)
 	dataDir := fs.String("data", "data", "data directory")
@@ -294,11 +209,11 @@ func cmdAuth(args []string) error {
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
 		return err
 	}
-	cfg, err := loadConfig(*dataDir)
+	cfg, err := ingest.LoadConfig(*dataDir)
 	if err != nil {
 		return err
 	}
-	c := firstNonEmpty(shopifyCreds{
+	c := ingest.Merge(ingest.Creds{
 		Shop: *shop, ClientID: *clientID, ClientSecret: *clientSecret,
 	}, cfg)
 	if c.Shop == "" {
@@ -319,7 +234,7 @@ func cmdAuth(args []string) error {
 	}
 
 	c.Token = res.AccessToken
-	if err := saveConfig(*dataDir, c); err != nil {
+	if err := ingest.SaveConfig(*dataDir, c); err != nil {
 		return err
 	}
 	fmt.Printf("\n✅ Access token saved to %s\n", filepath.Join(*dataDir, "shopify.json"))
@@ -342,61 +257,33 @@ func cmdPull(args []string) error {
 	}
 	defer st.Close()
 
-	creds, err := resolveCreds(*dataDir, *shop, *token, *apiVersion)
+	creds, err := ingest.ResolveCreds(*dataDir, *shop, *token, *apiVersion)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Pulling discounts from %s …\n", creds.Shop)
 
-	client := shopify.New(creds.Shop, creds.Token, creds.APIVersion)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-
-	fmt.Printf("Pulling discounts from %s …\n", creds.Shop)
-	rows, err := client.FetchDiscounts(ctx)
+	res, err := ingest.PullWithCreds(ctx, st, creds)
 	if err != nil {
 		return err
 	}
-	if len(rows) == 0 {
-		return fmt.Errorf("no discounts returned (check token scope: read_discounts)")
-	}
-
-	hash := hashRows(rows)
-	if existing, err := st.FindByHash(hash); err != nil {
-		return err
-	} else if existing != nil {
+	if res.Deduped {
 		fmt.Printf("No changes since snapshot #%d (taken %s). Nothing to do.\n",
-			existing.ID, existing.TakenAt.Local().Format("Jan 2, 2006 15:04"))
+			res.SnapshotID, res.TakenAt.Local().Format("Jan 2, 2006 15:04"))
 		return nil
 	}
-
-	now := time.Now()
-	meta := store.SnapshotMeta{
-		TakenAt:    now,
-		ImportedAt: now,
-		SourceFile: "shopify-api:" + creds.Shop,
-		FileHash:   hash,
-	}
-	id, err := st.Import(meta, rows)
-	if err != nil {
-		return err
-	}
 	fmt.Printf("Pulled snapshot #%d — %d codes, taken %s.\n",
-		id, len(rows), now.Local().Format("Jan 2, 2006 15:04"))
-	printDelta(st, id)
-	return nil
-}
-
-// hashRows produces a content hash so an unchanged pull dedupes against the
-// previous snapshot (mirroring import's file-hash idempotency).
-func hashRows(rows []csvimport.Row) string {
-	sorted := append([]csvimport.Row(nil), rows...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-	h := sha256.New()
-	for _, r := range sorted {
-		fmt.Fprintf(h, "%s|%g|%s|%s|%d|%s|%s|%s\n",
-			r.Name, r.Value, r.ValueType, r.Type, r.TimesUsed, r.Status, r.StartAt, r.EndAt)
+		res.SnapshotID, res.RowCount, res.TakenAt.Local().Format("Jan 2, 2006 15:04"))
+	fmt.Printf("  Total uses: %d  (%+d since previous snapshot)\n", res.TotalUses, res.TotalDelta)
+	if res.NewCodes > 0 {
+		fmt.Printf("  New codes: %d\n", res.NewCodes)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	if len(res.Removed) > 0 {
+		fmt.Printf("  Removed since previous: %d  (%s)\n", len(res.Removed), strings.Join(res.Removed, ", "))
+	}
+	return nil
 }
 
 func cmdServe(args []string) error {
@@ -411,7 +298,7 @@ func cmdServe(args []string) error {
 	}
 	defer st.Close()
 
-	srv, err := web.New(st)
+	srv, err := web.New(st, *dataDir)
 	if err != nil {
 		return err
 	}
