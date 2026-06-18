@@ -144,3 +144,47 @@ func TestNodesToRows(t *testing.T) {
 		}
 	}
 }
+
+func TestAggregateOrderDiscounts(t *testing.T) {
+	mk := func(amount, currency string, codes ...string) orderNode {
+		var o orderNode
+		o.DiscountCodes = codes
+		o.TotalDiscountsSet.ShopMoney.Amount = amount
+		o.TotalDiscountsSet.ShopMoney.CurrencyCode = currency
+		return o
+	}
+	orders := []orderNode{
+		mk("10.00", "USD", "SUMMER15"),
+		mk("5.00", "USD", "SUMMER15", "FREESHIP"),
+		mk("20.00", "USD", "FREESHIP"),
+		mk("2.50", "USD"), // no codes applied: ignored
+	}
+
+	got := aggregateOrderDiscounts(orders)
+
+	// Three orders carry codes; SUMMER15 totals 15 across 2 orders, FREESHIP
+	// totals 25 across 2 orders. The codeless order contributes nothing.
+	if len(got) != 2 {
+		t.Fatalf("got %d codes, want 2: %+v", len(got), got)
+	}
+
+	// Descending by TotalDiscount: FREESHIP (25) before SUMMER15 (15).
+	if got[0].Code != "FREESHIP" || got[1].Code != "SUMMER15" {
+		t.Fatalf("sort order wrong: %s then %s", got[0].Code, got[1].Code)
+	}
+
+	by := map[string]OrderDiscount{}
+	for _, d := range got {
+		by[d.Code] = d
+	}
+
+	free := by["FREESHIP"]
+	if free.TotalDiscount != 25 || free.OrderCount != 2 || free.Currency != "USD" {
+		t.Errorf("FREESHIP total=%v count=%d cur=%q, want 25 2 USD", free.TotalDiscount, free.OrderCount, free.Currency)
+	}
+
+	summer := by["SUMMER15"]
+	if summer.TotalDiscount != 15 || summer.OrderCount != 2 || summer.Currency != "USD" {
+		t.Errorf("SUMMER15 total=%v count=%d cur=%q, want 15 2 USD", summer.TotalDiscount, summer.OrderCount, summer.Currency)
+	}
+}

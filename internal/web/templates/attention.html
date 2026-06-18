@@ -1,0 +1,44 @@
+{{template "top" .}}
+<h1>Needs attention</h1>
+<p class="sub">Active codes that expire soon or are near their usage limit, from the latest snapshot.</p>
+
+<h2>Expiring soon (next 30 days)</h2>
+{{if not .Expiring}}
+	<p class="muted">No active codes expiring in the next 30 days.</p>
+{{else}}
+<table class="grid">
+	<thead><tr><th>Code</th><th>Value</th><th class="r">Times used</th><th class="r">Limit</th><th>Ends</th></tr></thead>
+	<tbody>
+	{{range .Expiring}}
+		<tr>
+			<td><a href="{{codeURL .Name}}">{{.Name}}</a></td>
+			<td>{{if eq .ValueType "percentage"}}{{pct .Value}}{{else if eq .ValueType "fixed_amount"}}${{printf "%g" .Value}}{{else}}{{.Type}}{{end}}</td>
+			<td class="r mono">{{.TimesUsed}}</td>
+			<td class="r mono">{{if .UsageLimit}}{{.UsageLimit}}{{else}}∞{{end}}</td>
+			<td>{{rfcday .EndAt}}</td>
+		</tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}
+
+<h2>Approaching usage limit (≥ 80%)</h2>
+{{if not .NearCap}}
+	<p class="muted">No codes near their usage limit.</p>
+{{else}}
+<table class="grid">
+	<thead><tr><th>Code</th><th>Value</th><th class="r">Times used</th><th class="r">Limit</th><th>Ends</th></tr></thead>
+	<tbody>
+	{{range .NearCap}}
+		<tr>
+			<td><a href="{{codeURL .Name}}">{{.Name}}</a></td>
+			<td>{{if eq .ValueType "percentage"}}{{pct .Value}}{{else if eq .ValueType "fixed_amount"}}${{printf "%g" .Value}}{{else}}{{.Type}}{{end}}</td>
+			<td class="r mono">{{.TimesUsed}}</td>
+			<td class="r mono">{{.Limit}}</td>
+			<td>{{rfcday .EndAt}}</td>
+		</tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}
+{{template "bottom" .}}

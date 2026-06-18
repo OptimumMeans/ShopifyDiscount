@@ -12,6 +12,18 @@
 	<div class="sparkmeta"><span>min {{.Min}}</span><span>max {{.Max}}</span></div>
 </div>
 
+<h2>Note</h2>
+<div class="notecard">
+	{{if .Note.Note}}<p class="note-body">{{.Note.Note}}</p>{{end}}
+	{{if .Note.Tags}}<p class="note-tags">{{range $i, $t := splitTags .Note.Tags}}<span class="badge">{{$t}}</span> {{end}}</p>{{end}}
+	{{if .Note.UpdatedAt.IsZero}}{{if not .Note.Note}}<p class="muted">No note yet.</p>{{end}}{{else}}<p class="sub" style="margin:8px 0 0">Updated {{date .Note.UpdatedAt}}</p>{{end}}
+	<form class="note-form" method="post" action="{{codeURL .Name}}/note">
+		<textarea name="note" rows="3" placeholder="Add a note…">{{.Note.Note}}</textarea>
+		<input type="text" name="tags" value="{{.Note.Tags}}" placeholder="tags, comma, separated">
+		<button type="submit" class="btn">Save note</button>
+	</form>
+</div>
+
 <h2>Usage history</h2>
 <table class="grid">
 	<thead><tr><th>Snapshot taken</th><th class="r">Times used</th><th class="r">Change</th><th>Status</th></tr></thead>

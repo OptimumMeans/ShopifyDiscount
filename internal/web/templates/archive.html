@@ -16,7 +16,7 @@
 </div>
 <table class="grid" id="codes">
 	<thead><tr>
-		<th>Code</th><th>Value</th><th class="r">Times used</th><th>Status</th>
+		<th>Code</th><th>Value</th><th class="r">Times used</th>{{if .HasRevenue}}<th class="r">$ Saved</th>{{end}}<th>Status</th>
 		<th>State</th><th>First seen</th><th>Last seen</th><th class="r">Snapshots</th>
 	</tr></thead>
 	<tbody>
@@ -25,6 +25,7 @@
 			<td><a href="{{codeURL .Name}}">{{.Name}}</a></td>
 			<td>{{if eq .ValueType "percentage"}}{{pct .Value}}{{else if eq .ValueType "fixed_amount"}}${{printf "%g" .Value}}{{else}}{{.ValueType}}{{end}}</td>
 			<td class="r mono">{{.TimesUsed}}</td>
+			{{if $.HasRevenue}}<td class="r mono">{{revLabel $.Revenue .Name}}</td>{{end}}
 			<td><span class="badge {{lower .Status}}">{{.Status}}</span></td>
 			<td>{{if .Live}}<span class="badge live">Live</span>{{else}}<span class="badge retired">Retired</span>{{end}}</td>
 			<td>{{day .FirstSeen}}</td>

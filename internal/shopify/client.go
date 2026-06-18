@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -209,6 +210,192 @@ func snippet(b []byte) string {
 	return s
 }
 
+// ---- Order discount totals ---------------------------------------------------
+
+// OrderDiscount is the aggregated discount total attributed to one code.
+type OrderDiscount struct {
+	Code          string
+	TotalDiscount float64
+	OrderCount    int
+	Currency      string
+}
+
+// FetchOrderDiscounts pages through orders created at/after sinceISO (RFC3339)
+// and sums each order's total discount against every code applied to it.
+// Requires the read_orders scope. sinceISO may be "" for all orders.
+func (c *Client) FetchOrderDiscounts(ctx context.Context, sinceISO string) ([]OrderDiscount, error) {
+	if c.Shop == "" || c.Token == "" {
+		return nil, fmt.Errorf("shop and token are required")
+	}
+	var q string
+	if sinceISO != "" {
+		q = "created_at:>=" + sinceISO
+	}
+	var (
+		all    []orderNode
+		cursor string
+	)
+	for {
+		page, err := c.fetchOrderPage(ctx, q, cursor)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Nodes...)
+		if !page.PageInfo.HasNextPage {
+			break
+		}
+		cursor = page.PageInfo.EndCursor
+	}
+	return aggregateOrderDiscounts(all), nil
+}
+
+func (c *Client) fetchOrderPage(ctx context.Context, q, cursor string) (*orderConnection, error) {
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		conn, throttled, err := c.doOrderRequest(ctx, q, cursor)
+		switch {
+		case err == nil:
+			return conn, nil
+		case throttled:
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 2 * time.Second):
+			}
+		default:
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("giving up after throttling: %w", lastErr)
+}
+
+func (c *Client) doOrderRequest(ctx context.Context, q, cursor string) (*orderConnection, bool, error) {
+	var qp, cur *string
+	if q != "" {
+		qp = &q
+	}
+	if cursor != "" {
+		cur = &cursor
+	}
+	body, err := json.Marshal(map[string]any{
+		"query":     ordersQuery,
+		"variables": map[string]any{"q": qp, "cursor": cur},
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(), bytes.NewReader(body))
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Shopify-Access-Token", c.Token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return nil, true, fmt.Errorf("shopify HTTP %d: %s", resp.StatusCode, snippet(raw))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("shopify HTTP %d: %s", resp.StatusCode, snippet(raw))
+	}
+
+	var out ordersResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, false, fmt.Errorf("decoding response: %w", err)
+	}
+	if len(out.Errors) > 0 {
+		msg := out.Errors[0].Message
+		throttled := strings.Contains(strings.ToUpper(msg), "THROTTLED")
+		return nil, throttled, fmt.Errorf("graphql error: %s", msg)
+	}
+	return &out.Data.Orders, false, nil
+}
+
+// aggregateOrderDiscounts sums each order's total discount against every code
+// applied to it, returning one row per code sorted by TotalDiscount descending.
+// Kept separate from the network path so it can be unit-tested.
+func aggregateOrderDiscounts(orders []orderNode) []OrderDiscount {
+	byCode := map[string]*OrderDiscount{}
+	for _, o := range orders {
+		amt, _ := strconv.ParseFloat(o.TotalDiscountsSet.ShopMoney.Amount, 64)
+		cur := o.TotalDiscountsSet.ShopMoney.CurrencyCode
+		for _, code := range o.DiscountCodes {
+			d := byCode[code]
+			if d == nil {
+				d = &OrderDiscount{Code: code}
+				byCode[code] = d
+			}
+			d.TotalDiscount += amt
+			d.OrderCount++
+			if cur != "" {
+				d.Currency = cur
+			}
+		}
+	}
+	out := make([]OrderDiscount, 0, len(byCode))
+	for _, d := range byCode {
+		out = append(out, *d)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TotalDiscount != out[j].TotalDiscount {
+			return out[i].TotalDiscount > out[j].TotalDiscount
+		}
+		return out[i].Code < out[j].Code
+	})
+	return out
+}
+
+// ---- Order GraphQL response shapes ------------------------------------------
+
+type ordersResponse struct {
+	Data struct {
+		Orders orderConnection `json:"orders"`
+	} `json:"data"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+type orderConnection struct {
+	PageInfo struct {
+		HasNextPage bool   `json:"hasNextPage"`
+		EndCursor   string `json:"endCursor"`
+	} `json:"pageInfo"`
+	Nodes []orderNode `json:"nodes"`
+}
+
+// orderNode mirrors the decoded JSON for a single order.
+type orderNode struct {
+	DiscountCodes     []string `json:"discountCodes"`
+	TotalDiscountsSet struct {
+		ShopMoney struct {
+			Amount       string `json:"amount"`
+			CurrencyCode string `json:"currencyCode"`
+		} `json:"shopMoney"`
+	} `json:"totalDiscountsSet"`
+}
+
+// ordersQuery pages through orders, optionally filtered by a created_at query.
+// Requires the read_orders scope.
+const ordersQuery = `
+query Orders($q: String, $cursor: String) {
+  orders(first: 100, after: $cursor, query: $q) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      discountCodes
+      totalDiscountsSet { shopMoney { amount currencyCode } }
+    }
+  }
+}`
+
 // ---- GraphQL response shapes -------------------------------------------------
 
 type gqlResponse struct {
@@ -252,14 +439,14 @@ type codesConn struct {
 // fragments that share field names, unset fields simply decode to their zero
 // value (pointers stay nil).
 type discount struct {
-	Typename               string  `json:"__typename"`
-	Title                  string  `json:"title"`
-	Status                 string  `json:"status"`
-	StartsAt               string  `json:"startsAt"`
-	EndsAt                 string  `json:"endsAt"`
-	AsyncUsageCount        int     `json:"asyncUsageCount"`
-	UsageLimit             *int    `json:"usageLimit"`
-	AppliesOncePerCustomer *bool      `json:"appliesOncePerCustomer"`
+	Typename               string `json:"__typename"`
+	Title                  string `json:"title"`
+	Status                 string `json:"status"`
+	StartsAt               string `json:"startsAt"`
+	EndsAt                 string `json:"endsAt"`
+	AsyncUsageCount        int    `json:"asyncUsageCount"`
+	UsageLimit             *int   `json:"usageLimit"`
+	AppliesOncePerCustomer *bool  `json:"appliesOncePerCustomer"`
 	CodesCount             *struct {
 		Count int `json:"count"`
 	} `json:"codesCount"`

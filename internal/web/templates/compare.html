@@ -1,0 +1,69 @@
+{{template "top" .}}
+<h1>Compare snapshots</h1>
+<p class="sub">Diff two snapshots to see which codes were added, removed, or changed usage.</p>
+
+<form class="compare-form" method="get" action="/compare">
+	<label>From (A)
+		<select name="a">
+			<option value="">— select —</option>
+			{{range .Snapshots}}
+				<option value="{{.ID}}"{{if and $.HasA (eq .ID $.A)}} selected{{end}}>#{{.ID}} · {{date .TakenAt}}</option>
+			{{end}}
+		</select>
+	</label>
+	<label>To (B)
+		<select name="b">
+			<option value="">— select —</option>
+			{{range .Snapshots}}
+				<option value="{{.ID}}"{{if and $.HasB (eq .ID $.B)}} selected{{end}}>#{{.ID}} · {{date .TakenAt}}</option>
+			{{end}}
+		</select>
+	</label>
+	<button type="submit" class="btn">Compare</button>
+</form>
+
+{{if and .HasA .HasB}}
+	<h2>Changed usage ({{len .Changed}})</h2>
+	{{if not .Changed}}
+		<p class="muted">No codes changed usage between these snapshots.</p>
+	{{else}}
+	<table class="grid">
+		<thead><tr><th>Code</th><th class="r">A</th><th class="r">B</th><th class="r">Change</th></tr></thead>
+		<tbody>
+		{{range .Changed}}
+			<tr>
+				<td><a href="{{codeURL .Name}}">{{.Name}}</a></td>
+				<td class="r mono">{{.A}}</td>
+				<td class="r mono">{{.B}}</td>
+				<td class="r">{{delta .Delta}}</td>
+			</tr>
+		{{end}}
+		</tbody>
+	</table>
+	{{end}}
+
+	<h2>Added in B ({{len .OnlyB}})</h2>
+	{{if not .OnlyB}}
+		<p class="muted">None.</p>
+	{{else}}
+	<table class="grid">
+		<thead><tr><th>Code</th></tr></thead>
+		<tbody>
+		{{range .OnlyB}}<tr><td><a href="{{codeURL .}}">{{.}}</a></td></tr>{{end}}
+		</tbody>
+	</table>
+	{{end}}
+
+	<h2>Removed since A ({{len .OnlyA}})</h2>
+	{{if not .OnlyA}}
+		<p class="muted">None.</p>
+	{{else}}
+	<table class="grid">
+		<thead><tr><th>Code</th></tr></thead>
+		<tbody>
+		{{range .OnlyA}}<tr><td><a href="{{codeURL .}}">{{.}}</a></td></tr>{{end}}
+		</tbody>
+	</table>
+	{{end}}
+{{end}}
+{{template "bottom" .}}

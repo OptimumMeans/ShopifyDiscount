@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,12 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "report":
 		err = cmdReport(os.Args[2:])
+	case "backup":
+		err = cmdBackup(os.Args[2:])
+	case "digest":
+		err = cmdDigest(os.Args[2:])
+	case "revenue":
+		err = cmdRevenue(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -70,6 +77,9 @@ Commands:
   pull                  Pull discounts directly from the Shopify Admin API as a snapshot
   serve                 Start the local web dashboard
   report                Print a text summary of the latest snapshot
+  backup                Write a consistent copy of the database to a file or folder
+  digest                Print (and optionally log) a short change summary of the latest snapshot
+  revenue               Pull per-code order-discount revenue totals from the Shopify Admin API
 
 Common flags:
   -data DIR             Data directory for the database + archived CSVs (default "data")
@@ -98,6 +108,15 @@ pull flags:
 serve flags:
   -addr HOST:PORT       Listen address (default "127.0.0.1:8080")
   -pull-every DURATION  Auto-pull from Shopify on this interval (e.g. 24h) while serving
+
+backup flags:
+  -to PATH              Target file, or a directory (writes discounts-backup.db inside) (required)
+
+digest flags:
+  -log PATH             Also append the digest, with a timestamp, to this file
+
+revenue flags:
+  -since-days N         Only count orders from the last N days (default 90; 0 for all)
 `)
 }
 
@@ -399,6 +418,179 @@ func cmdReport(args []string) error {
 	if len(gone) > 0 {
 		fmt.Printf("\nRemoved since previous snapshot: %s\n", strings.Join(gone, ", "))
 	}
+	return nil
+}
+
+func cmdBackup(args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	dataDir := fs.String("data", "data", "data directory")
+	to := fs.String("to", "", "target file or directory")
+	fs.Parse(args)
+
+	if *to == "" {
+		return fmt.Errorf("backup requires -to (a file or directory)")
+	}
+
+	// Resolve the final target. A trailing separator, or an existing directory,
+	// means write a default filename inside it.
+	target := *to
+	isDir := strings.HasSuffix(*to, string(os.PathSeparator)) || strings.HasSuffix(*to, "/")
+	if !isDir {
+		if fi, err := os.Stat(*to); err == nil && fi.IsDir() {
+			isDir = true
+		}
+	}
+	if isDir {
+		if err := os.MkdirAll(*to, 0o755); err != nil {
+			return err
+		}
+		target = filepath.Join(*to, "discounts-backup.db")
+	}
+
+	st, err := openStore(*dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	// BackupTo requires the destination not to exist, so write to a temp file and
+	// rename it over any existing backup.
+	tmp := target + ".tmp"
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := st.BackupTo(tmp); err != nil {
+		return err
+	}
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return err
+	}
+
+	fi, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Backed up to %s (%d bytes).\n", target, fi.Size())
+	return nil
+}
+
+func cmdDigest(args []string) error {
+	fs := flag.NewFlagSet("digest", flag.ExitOnError)
+	dataDir := fs.String("data", "data", "data directory")
+	logPath := fs.String("log", "", "append the digest to this file")
+	fs.Parse(args)
+
+	st, err := openStore(*dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	latest, err := st.LatestSnapshot()
+	if err != nil {
+		return err
+	}
+	if latest == nil {
+		fmt.Println("No snapshots yet.")
+		return nil
+	}
+	discs, err := st.SnapshotDiscounts(latest.ID)
+	if err != nil {
+		return err
+	}
+	gone, _ := st.DisappearedCodes(latest.ID)
+
+	report := buildDigest(latest, discs, gone)
+	fmt.Print(report)
+
+	if *logPath != "" {
+		f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		entry := fmt.Sprintf("=== %s ===\n%s\n", time.Now().Format("2006-01-02 15:04:05"), report)
+		if _, err := f.WriteString(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// buildDigest renders a short, readable change summary for the latest snapshot.
+func buildDigest(latest *store.SnapshotMeta, discs []store.DiscountView, gone []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Snapshot #%d taken %s\n", latest.ID, latest.TakenAt.Local().Format("Jan 2, 2006 15:04"))
+
+	// Redemptions since last, sorted by delta descending.
+	movers := append([]store.DiscountView(nil), discs...)
+	sort.SliceStable(movers, func(i, j int) bool { return movers[i].Delta > movers[j].Delta })
+	b.WriteString("Redemptions since last:\n")
+	shown := 0
+	for _, d := range movers {
+		if d.Delta <= 0 {
+			break
+		}
+		fmt.Fprintf(&b, "  +%d  %s (now %d)\n", d.Delta, d.Name, d.TimesUsed)
+		shown++
+	}
+	if shown == 0 {
+		b.WriteString("  (none)\n")
+	}
+
+	// Codes that have reached their per-code usage limit.
+	b.WriteString("Hit usage limit:\n")
+	hit := 0
+	for _, d := range discs {
+		limit, err := strconv.Atoi(strings.TrimSpace(d.UsageLimit))
+		if err != nil {
+			continue
+		}
+		if d.TimesUsed >= limit {
+			fmt.Fprintf(&b, "  %s (%d/%d)\n", d.Name, d.TimesUsed, limit)
+			hit++
+		}
+	}
+	if hit == 0 {
+		b.WriteString("  (none)\n")
+	}
+
+	// Codes that disappeared since the previous snapshot.
+	b.WriteString("Newly removed:\n")
+	if len(gone) > 0 {
+		for _, code := range gone {
+			fmt.Fprintf(&b, "  %s\n", code)
+		}
+	} else {
+		b.WriteString("  (none)\n")
+	}
+	return b.String()
+}
+
+func cmdRevenue(args []string) error {
+	fs := flag.NewFlagSet("revenue", flag.ExitOnError)
+	dataDir := fs.String("data", "data", "data directory")
+	sinceDays := fs.Int("since-days", 90, "only count orders from the last N days (0 for all)")
+	fs.Parse(args)
+
+	st, err := openStore(*dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	fmt.Println("Pulling order-discount revenue …")
+	n, err := ingest.PullRevenue(ctx, st, *dataDir, *sinceDays)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Stored revenue totals for %d codes.\n", n)
 	return nil
 }
 

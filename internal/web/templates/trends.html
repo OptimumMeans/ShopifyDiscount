@@ -1,0 +1,27 @@
+{{template "top" .}}
+<h1>Trends</h1>
+<p class="sub">Total redemptions across all snapshots over time.</p>
+
+<div class="linebox">
+	{{linechart .Points}}
+</div>
+
+<h2>By snapshot</h2>
+{{if not .Rows}}
+	<p class="muted">No snapshots yet.</p>
+{{else}}
+<table class="grid">
+	<thead><tr><th>Taken</th><th class="r">Codes</th><th class="r">Total uses</th><th class="r">Change</th></tr></thead>
+	<tbody>
+	{{range .Rows}}
+		<tr>
+			<td>{{date .TakenAt}}</td>
+			<td class="r mono">{{.CodeCount}}</td>
+			<td class="r mono">{{.TotalUses}}</td>
+			<td class="r">{{if .HadPrev}}{{delta .Delta}}{{else}}—{{end}}</td>
+		</tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}
+{{template "bottom" .}}

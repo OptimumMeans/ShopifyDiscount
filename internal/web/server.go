@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +52,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /backup/db", s.handleBackupDB)
 	mux.HandleFunc("GET /backup/csv", s.handleBackupCSV)
 	mux.HandleFunc("GET /code/{name}", s.handleCode)
+	mux.HandleFunc("POST /code/{name}/note", s.handleSetNote)
+	mux.HandleFunc("GET /owners", s.handleOwners)
+	mux.HandleFunc("GET /trends", s.handleTrends)
+	mux.HandleFunc("GET /attention", s.handleAttention)
+	mux.HandleFunc("GET /compare", s.handleCompare)
 	mux.HandleFunc("POST /pull", s.handlePull)
 	mux.HandleFunc("GET /logo", s.handleLogo)
 	if static, err := fs.Sub(assets, "static"); err == nil {
@@ -269,10 +275,12 @@ func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
 }
 
 type archiveData struct {
-	Codes   []store.ArchivedCode
-	Total   int
-	Live    int
-	Retired int
+	Codes      []store.ArchivedCode
+	Total      int
+	Live       int
+	Retired    int
+	HasRevenue bool
+	Revenue    map[string]store.Revenue
 }
 
 func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +297,28 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 			d.Retired++
 		}
 	}
+	rev, err := s.st.AllRevenue()
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	if len(rev) > 0 {
+		d.HasRevenue = true
+		d.Revenue = rev
+	}
 	s.render(w, "archive.html", d)
+}
+
+// revLabel formats a code's revenue from the map, "—" when absent.
+func revLabel(m map[string]store.Revenue, name string) string {
+	r, ok := m[name]
+	if !ok {
+		return "—"
+	}
+	if r.Currency != "" {
+		return fmt.Sprintf("%s %.2f", r.Currency, r.TotalDiscount)
+	}
+	return fmt.Sprintf("%.2f", r.TotalDiscount)
 }
 
 // handleBackupDB streams a consistent copy of the SQLite database as a download.
@@ -358,6 +387,7 @@ type codeData struct {
 	Min     int
 	Max     int
 	First   store.HistoryPoint
+	Note    store.Note
 }
 
 func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
@@ -381,7 +411,262 @@ func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
 			d.Max = p.TimesUsed
 		}
 	}
+	note, err := s.st.GetNote(name)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	d.Note = note
 	s.render(w, "code.html", d)
+}
+
+// handleSetNote saves a free-form note + tags for a code and redirects back.
+func (s *Server) handleSetNote(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := r.ParseForm(); err != nil {
+		httpError(w, err)
+		return
+	}
+	if err := s.st.SetNote(name, strings.TrimSpace(r.FormValue("note")), strings.TrimSpace(r.FormValue("tags"))); err != nil {
+		httpError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/code/"+url.PathEscape(name), http.StatusSeeOther)
+}
+
+// inferOwner derives an owner/group label from a code by trimming trailing
+// digits and trailing non-alphanumeric characters (e.g. "Elisa15" -> "Elisa").
+// It does no brand-specific stripping — digits and punctuation only.
+func inferOwner(code string) string {
+	r := []rune(code)
+	i := len(r)
+	for i > 0 {
+		c := r[i-1]
+		if (c >= '0' && c <= '9') ||
+			!(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			i--
+			continue
+		}
+		break
+	}
+	owner := string(r[:i])
+	if owner == "" {
+		return code
+	}
+	return owner
+}
+
+type ownerRow struct {
+	Owner     string
+	Codes     int
+	TimesUsed int
+}
+
+type ownersData struct {
+	Owners []ownerRow
+	Total  int
+}
+
+func (s *Server) handleOwners(w http.ResponseWriter, r *http.Request) {
+	latest, err := s.st.LatestSnapshot()
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	if latest == nil {
+		s.render(w, "owners.html", ownersData{})
+		return
+	}
+	discs, err := s.st.SnapshotDiscounts(latest.ID)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	idx := map[string]int{}
+	var rows []ownerRow
+	for _, d := range discs {
+		o := inferOwner(d.Name)
+		if i, ok := idx[o]; ok {
+			rows[i].Codes++
+			rows[i].TimesUsed += d.TimesUsed
+		} else {
+			idx[o] = len(rows)
+			rows = append(rows, ownerRow{Owner: o, Codes: 1, TimesUsed: d.TimesUsed})
+		}
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].TimesUsed > rows[j].TimesUsed })
+	s.render(w, "owners.html", ownersData{Owners: rows, Total: len(discs)})
+}
+
+type trendRow struct {
+	store.SnapshotTotal
+	Delta   int
+	HadPrev bool
+}
+
+type trendsData struct {
+	Points []store.SnapshotTotal
+	Rows   []trendRow
+}
+
+func (s *Server) handleTrends(w http.ResponseWriter, r *http.Request) {
+	totals, err := s.st.SnapshotTotals()
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	rows := make([]trendRow, len(totals))
+	for i, t := range totals {
+		rows[i] = trendRow{SnapshotTotal: t}
+		if i > 0 {
+			rows[i].HadPrev = true
+			rows[i].Delta = t.TotalUses - totals[i-1].TotalUses
+		}
+	}
+	// Newest first for the table.
+	rev := make([]trendRow, len(rows))
+	for i := range rows {
+		rev[len(rows)-1-i] = rows[i]
+	}
+	s.render(w, "trends.html", trendsData{Points: totals, Rows: rev})
+}
+
+type attnRow struct {
+	store.DiscountView
+	Limit int
+	Ratio float64
+}
+
+type attentionData struct {
+	Expiring []attnRow
+	NearCap  []attnRow
+}
+
+func (s *Server) handleAttention(w http.ResponseWriter, r *http.Request) {
+	latest, err := s.st.LatestSnapshot()
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	var d attentionData
+	if latest == nil {
+		s.render(w, "attention.html", d)
+		return
+	}
+	discs, err := s.st.SnapshotDiscounts(latest.ID)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	now := time.Now()
+	cutoff := now.AddDate(0, 0, 30)
+	type expiring struct {
+		row attnRow
+		end time.Time
+	}
+	var exp []expiring
+	for _, d2 := range discs {
+		if !strings.EqualFold(d2.Status, "active") {
+			continue
+		}
+		if d2.EndAt == "" {
+			continue
+		}
+		end, err := time.Parse(time.RFC3339, d2.EndAt)
+		if err != nil {
+			continue
+		}
+		if end.After(now) && end.Before(cutoff) {
+			exp = append(exp, expiring{row: attnRow{DiscountView: d2}, end: end})
+		}
+	}
+	sort.SliceStable(exp, func(i, j int) bool { return exp[i].end.Before(exp[j].end) })
+	for _, e := range exp {
+		d.Expiring = append(d.Expiring, e.row)
+	}
+
+	for _, d2 := range discs {
+		limit, err := strconv.Atoi(strings.TrimSpace(d2.UsageLimit))
+		if err != nil || limit <= 0 {
+			continue
+		}
+		ratio := float64(d2.TimesUsed) / float64(limit)
+		if ratio >= 0.8 && d2.TimesUsed <= limit {
+			d.NearCap = append(d.NearCap, attnRow{DiscountView: d2, Limit: limit, Ratio: ratio})
+		}
+	}
+	sort.SliceStable(d.NearCap, func(i, j int) bool { return d.NearCap[i].Ratio > d.NearCap[j].Ratio })
+	s.render(w, "attention.html", d)
+}
+
+type compareChange struct {
+	Name  string
+	A     int
+	B     int
+	Delta int
+}
+
+type compareData struct {
+	Snapshots []store.SnapshotMeta
+	A         int64
+	B         int64
+	HasA      bool
+	HasB      bool
+	OnlyA     []string // removed
+	OnlyB     []string // added
+	Changed   []compareChange
+}
+
+func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
+	snaps, err := s.st.Snapshots()
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	d := compareData{Snapshots: snaps}
+	aStr := r.URL.Query().Get("a")
+	bStr := r.URL.Query().Get("b")
+	if aStr == "" || bStr == "" {
+		s.render(w, "compare.html", d)
+		return
+	}
+	a, errA := strconv.ParseInt(aStr, 10, 64)
+	b, errB := strconv.ParseInt(bStr, 10, 64)
+	if errA != nil || errB != nil {
+		s.render(w, "compare.html", d)
+		return
+	}
+	d.A, d.B, d.HasA, d.HasB = a, b, true, true
+	rowsA, err := s.st.SnapshotRowsByName(a)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	rowsB, err := s.st.SnapshotRowsByName(b)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	for name, ra := range rowsA {
+		if rb, ok := rowsB[name]; ok {
+			if ra.TimesUsed != rb.TimesUsed {
+				d.Changed = append(d.Changed, compareChange{
+					Name: name, A: ra.TimesUsed, B: rb.TimesUsed, Delta: rb.TimesUsed - ra.TimesUsed,
+				})
+			}
+		} else {
+			d.OnlyA = append(d.OnlyA, name)
+		}
+	}
+	for name := range rowsB {
+		if _, ok := rowsA[name]; !ok {
+			d.OnlyB = append(d.OnlyB, name)
+		}
+	}
+	sort.Strings(d.OnlyA)
+	sort.Strings(d.OnlyB)
+	sort.SliceStable(d.Changed, func(i, j int) bool { return d.Changed[i].Name < d.Changed[j].Name })
+	s.render(w, "compare.html", d)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
@@ -424,12 +709,28 @@ func funcMap() template.FuncMap {
 			}
 		},
 		"sparkline": sparkline,
+		"linechart": linechart,
 		"donut":     donut,
 		"bars":      bars,
-		"pctOf":     func(part, total int) string { if total == 0 { return "0%" }; return fmt.Sprintf("%.0f%%", float64(part)/float64(total)*100) },
-		"lower":     strings.ToLower,
-		"sub":       func(a, b int) int { return a - b },
-		"codeURL":   func(name string) string { return "/code/" + url.PathEscape(name) },
+		"revLabel":  revLabel,
+		"splitTags": func(s string) []string {
+			var out []string
+			for _, t := range strings.Split(s, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					out = append(out, t)
+				}
+			}
+			return out
+		},
+		"pctOf": func(part, total int) string {
+			if total == 0 {
+				return "0%"
+			}
+			return fmt.Sprintf("%.0f%%", float64(part)/float64(total)*100)
+		},
+		"lower":   strings.ToLower,
+		"sub":     func(a, b int) int { return a - b },
+		"codeURL": func(name string) string { return "/code/" + url.PathEscape(name) },
 		"dict": func(pairs ...any) (map[string]any, error) {
 			if len(pairs)%2 != 0 {
 				return nil, fmt.Errorf("dict: odd number of arguments")
@@ -492,6 +793,67 @@ func sparkline(history []store.HistoryPoint) template.HTML {
 	return template.HTML(fmt.Sprintf(
 		`<svg class="spark" width="%d" height="%d" viewBox="0 0 %d %d"><polyline fill="none" stroke="#16A3BE" stroke-width="2" points="%s"/></svg>`,
 		w, h, w, h, b.String()))
+}
+
+// linechart renders total uses over time as an inline SVG line chart: teal
+// stroke, dots at each point, and light gridlines at the min and max values.
+// Axis-free, ~640x220. Handles 0 and 1 points gracefully.
+func linechart(points []store.SnapshotTotal) template.HTML {
+	const w, h = 640, 220
+	const padL, padR, padT, padB = 16, 16, 16, 16
+	if len(points) == 0 {
+		return template.HTML(fmt.Sprintf(
+			`<svg class="line" width="%d" height="%d" viewBox="0 0 %d %d"><text x="%d" y="%d" text-anchor="middle" fill="#6b6b6b" font-size="13">No snapshots yet.</text></svg>`,
+			w, h, w, h, w/2, h/2))
+	}
+	if len(points) == 1 {
+		return template.HTML(fmt.Sprintf(
+			`<svg class="line" width="%d" height="%d" viewBox="0 0 %d %d"><circle cx="%d" cy="%d" r="4" fill="#16A3BE"/><text x="%d" y="%d" text-anchor="middle" fill="#6b6b6b" font-size="12">%d uses</text></svg>`,
+			w, h, w, h, w/2, h/2, w/2, h/2-12, points[0].TotalUses))
+	}
+	minV, maxV := points[0].TotalUses, points[0].TotalUses
+	for _, p := range points {
+		if p.TotalUses < minV {
+			minV = p.TotalUses
+		}
+		if p.TotalUses > maxV {
+			maxV = p.TotalUses
+		}
+	}
+	span := float64(maxV - minV)
+	if span == 0 {
+		span = 1
+	}
+	plotW := float64(w - padL - padR)
+	plotH := float64(h - padT - padB)
+	xAt := func(i int) float64 { return float64(padL) + float64(i)*plotW/float64(len(points)-1) }
+	yAt := func(v int) float64 { return float64(padT) + plotH - float64(v-minV)/span*plotH }
+
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg class="line" width="%d" height="%d" viewBox="0 0 %d %d">`, w, h, w, h)
+	// Gridlines at min and max.
+	yMax := yAt(maxV)
+	yMin := yAt(minV)
+	fmt.Fprintf(&b, `<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#e6e6e6" stroke-width="1"/>`, padL, yMax, w-padR, yMax)
+	fmt.Fprintf(&b, `<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#e6e6e6" stroke-width="1"/>`, padL, yMin, w-padR, yMin)
+	fmt.Fprintf(&b, `<text x="%d" y="%.1f" fill="#6b6b6b" font-size="11">%d</text>`, padL, yMax-4, maxV)
+	fmt.Fprintf(&b, `<text x="%d" y="%.1f" fill="#6b6b6b" font-size="11">%d</text>`, padL, yMin-4, minV)
+	// Polyline.
+	var pts strings.Builder
+	for i, p := range points {
+		if i > 0 {
+			pts.WriteByte(' ')
+		}
+		fmt.Fprintf(&pts, "%.1f,%.1f", xAt(i), yAt(p.TotalUses))
+	}
+	fmt.Fprintf(&b, `<polyline fill="none" stroke="#16A3BE" stroke-width="2" points="%s"/>`, pts.String())
+	// Dots.
+	for i, p := range points {
+		fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3" fill="#16A3BE"><title>%s · %d</title></circle>`,
+			xAt(i), yAt(p.TotalUses), html.EscapeString(p.TakenAt.Local().Format("Jan 2, 2006")), p.TotalUses)
+	}
+	b.WriteString(`</svg>`)
+	return template.HTML(b.String())
 }
 
 // donut renders a stacked-segment donut chart as inline SVG, with the total in

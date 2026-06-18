@@ -168,6 +168,37 @@ func PullWithCreds(ctx context.Context, st *store.Store, creds Creds) (*Result, 
 	return res, nil
 }
 
+// PullRevenue fetches order discounts since the last sinceDays days and stores
+// per-code revenue totals. Requires the token to have the read_orders scope.
+func PullRevenue(ctx context.Context, st *store.Store, dataDir string, sinceDays int) (int, error) {
+	creds, err := ResolveCreds(dataDir, "", "", "")
+	if err != nil {
+		return 0, err
+	}
+	var sinceISO string
+	if sinceDays > 0 {
+		sinceISO = time.Now().AddDate(0, 0, -sinceDays).UTC().Format(time.RFC3339)
+	}
+	client := shopify.New(creds.Shop, creds.Token, creds.APIVersion)
+	discounts, err := client.FetchOrderDiscounts(ctx, sinceISO)
+	if err != nil {
+		return 0, err
+	}
+	rev := make([]store.Revenue, 0, len(discounts))
+	for _, d := range discounts {
+		rev = append(rev, store.Revenue{
+			Name:          d.Code,
+			TotalDiscount: d.TotalDiscount,
+			OrderCount:    d.OrderCount,
+			Currency:      d.Currency,
+		})
+	}
+	if err := st.SetRevenue(rev, time.Now()); err != nil {
+		return 0, err
+	}
+	return len(rev), nil
+}
+
 // hashRows produces a content hash so an unchanged pull dedupes against the
 // previous snapshot (mirroring import's file-hash idempotency).
 func hashRows(rows []csvimport.Row) string {

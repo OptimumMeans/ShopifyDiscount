@@ -1,0 +1,20 @@
+{{template "top" .}}
+<h1>Owners</h1>
+<p class="sub">Per-owner rollup of the latest snapshot. Owners are inferred from each code by trimming trailing digits and punctuation.</p>
+{{if not .Owners}}
+	<p class="muted">No snapshot yet — pull or import data to see owners.</p>
+{{else}}
+<table class="grid">
+	<thead><tr><th>Owner</th><th class="r">Codes</th><th class="r">Total uses</th></tr></thead>
+	<tbody>
+	{{range .Owners}}
+		<tr>
+			<td>{{.Owner}}</td>
+			<td class="r mono">{{.Codes}}</td>
+			<td class="r mono">{{.TimesUsed}}</td>
+		</tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}
+{{template "bottom" .}}

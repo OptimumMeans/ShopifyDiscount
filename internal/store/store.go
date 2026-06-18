@@ -70,6 +70,21 @@ CREATE TABLE IF NOT EXISTS discount_rows (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rows_name ON discount_rows(name);
+
+CREATE TABLE IF NOT EXISTS notes (
+	name       TEXT PRIMARY KEY,
+	note       TEXT NOT NULL DEFAULT '',
+	tags       TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS revenue (
+	name           TEXT PRIMARY KEY,
+	total_discount REAL NOT NULL,
+	order_count    INTEGER NOT NULL,
+	currency       TEXT NOT NULL DEFAULT '',
+	computed_at    TEXT NOT NULL
+);
 `
 	_, err := s.db.Exec(schema)
 	return err
@@ -378,6 +393,164 @@ ORDER BY last_seen DESC, name ASC`)
 		c.LastSeen, _ = time.Parse(time.RFC3339, lastSeen)
 		c.Live = snapshotID == latestID
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SnapshotTotal is the aggregate state of one snapshot, for a trends chart.
+type SnapshotTotal struct {
+	ID        int64
+	TakenAt   time.Time
+	CodeCount int
+	TotalUses int
+}
+
+// SnapshotTotals returns one row per snapshot, oldest first.
+func (s *Store) SnapshotTotals() ([]SnapshotTotal, error) {
+	rows, err := s.db.Query(`SELECT sn.id, sn.taken_at, COUNT(r.name), COALESCE(SUM(r.times_used),0)
+		FROM snapshots sn LEFT JOIN discount_rows r ON r.snapshot_id = sn.id
+		GROUP BY sn.id, sn.taken_at
+		ORDER BY sn.taken_at ASC, sn.id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SnapshotTotal
+	for rows.Next() {
+		var t SnapshotTotal
+		var takenAt string
+		if err := rows.Scan(&t.ID, &takenAt, &t.CodeCount, &t.TotalUses); err != nil {
+			return nil, err
+		}
+		t.TakenAt, _ = time.Parse(time.RFC3339, takenAt)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// Note is a free-form note plus tags attached to a single code.
+type Note struct {
+	Name      string
+	Note      string
+	Tags      string
+	UpdatedAt time.Time
+}
+
+// GetNote returns the note for a code (zero-value Note, nil error if none).
+func (s *Store) GetNote(name string) (Note, error) {
+	row := s.db.QueryRow(`SELECT name, note, tags, updated_at FROM notes WHERE name = ?`, name)
+	var n Note
+	var updatedAt string
+	switch err := row.Scan(&n.Name, &n.Note, &n.Tags, &updatedAt); err {
+	case nil:
+		n.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		return n, nil
+	case sql.ErrNoRows:
+		return Note{}, nil
+	default:
+		return Note{}, err
+	}
+}
+
+// SetNote upserts a note + tags for a code. Deletes the row if both are empty.
+func (s *Store) SetNote(name, note, tags string) error {
+	if note == "" && tags == "" {
+		_, err := s.db.Exec(`DELETE FROM notes WHERE name = ?`, name)
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO notes (name, note, tags, updated_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET note=excluded.note, tags=excluded.tags, updated_at=excluded.updated_at`,
+		name, note, tags, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// AllNotes returns every note keyed by code name.
+func (s *Store) AllNotes() (map[string]Note, error) {
+	rows, err := s.db.Query(`SELECT name, note, tags, updated_at FROM notes`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]Note{}
+	for rows.Next() {
+		var n Note
+		var updatedAt string
+		if err := rows.Scan(&n.Name, &n.Note, &n.Tags, &updatedAt); err != nil {
+			return nil, err
+		}
+		n.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		out[n.Name] = n
+	}
+	return out, rows.Err()
+}
+
+// SnapshotRowsByName returns the discount rows of one snapshot keyed by code name.
+func (s *Store) SnapshotRowsByName(snapshotID int64) (map[string]csvimport.Row, error) {
+	rows, err := s.queryRows(`SELECT name, value, value_type, type, discount_class, min_purchase,
+		combines_order, combines_product, combines_shipping, customer_selection, context,
+		times_used, applies_once, usage_limit, status, start_at, end_at
+		FROM discount_rows WHERE snapshot_id = ?`, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]csvimport.Row, len(rows))
+	for _, r := range rows {
+		out[r.Name] = r
+	}
+	return out, nil
+}
+
+// Revenue is the discount spend attributed to one code, derived from order data.
+type Revenue struct {
+	Name          string
+	TotalDiscount float64
+	OrderCount    int
+	Currency      string
+	ComputedAt    time.Time
+}
+
+// SetRevenue replaces the entire revenue table with the given rows in one tx.
+func (s *Store) SetRevenue(rev []Revenue, computedAt time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM revenue`); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO revenue (name, total_discount, order_count, currency, computed_at)
+		VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	at := computedAt.UTC().Format(time.RFC3339)
+	for _, r := range rev {
+		if _, err := stmt.Exec(r.Name, r.TotalDiscount, r.OrderCount, r.Currency, at); err != nil {
+			return fmt.Errorf("insert revenue %q: %w", r.Name, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// AllRevenue returns revenue keyed by code name.
+func (s *Store) AllRevenue() (map[string]Revenue, error) {
+	rows, err := s.db.Query(`SELECT name, total_discount, order_count, currency, computed_at FROM revenue`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]Revenue{}
+	for rows.Next() {
+		var r Revenue
+		var computedAt string
+		if err := rows.Scan(&r.Name, &r.TotalDiscount, &r.OrderCount, &r.Currency, &computedAt); err != nil {
+			return nil, err
+		}
+		r.ComputedAt, _ = time.Parse(time.RFC3339, computedAt)
+		out[r.Name] = r
 	}
 	return out, rows.Err()
 }

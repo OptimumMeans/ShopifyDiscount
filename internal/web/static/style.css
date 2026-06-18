@@ -32,7 +32,7 @@ body {
 	font-weight: 700; color: #fff; text-decoration: none; font-size: 16px;
 	letter-spacing: .14em; text-transform: uppercase;
 }
-.topbar nav { display: flex; gap: 22px; }
+.topbar nav { display: flex; flex-wrap: wrap; gap: 22px; row-gap: 8px; }
 .topbar nav a {
 	color: var(--grey); text-decoration: none; font-size: 13px;
 	letter-spacing: .08em; text-transform: uppercase; padding-bottom: 2px;
@@ -176,6 +176,43 @@ pre {
 .sparkbox { background: var(--panel); border: 1px solid var(--light); border-radius: 12px; padding: 18px; display: inline-block; }
 .spark { display: block; }
 .sparkmeta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+/* Trends line chart */
+.linebox {
+	background: var(--panel); border: 1px solid var(--light); border-radius: 12px;
+	padding: 18px; overflow-x: auto;
+}
+.line { display: block; max-width: 100%; height: auto; }
+
+/* Code note */
+.notecard {
+	background: var(--panel); border: 1px solid var(--light); border-radius: 12px; padding: 18px;
+	max-width: 560px;
+}
+.note-body { margin: 0 0 10px; white-space: pre-wrap; }
+.note-tags { margin: 0 0 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+.note-form { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.note-form textarea, .note-form input {
+	width: 100%; padding: 9px 12px; font: inherit; font-size: 14px;
+	border: 1px solid var(--light); border-radius: 9px; outline: none; resize: vertical;
+}
+.note-form textarea:focus, .note-form input:focus {
+	border-color: var(--teal); box-shadow: 0 0 0 3px rgba(22,163,190,.15);
+}
+.note-form .btn { align-self: flex-start; cursor: pointer; }
+
+/* Compare form */
+.compare-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; margin: 0 0 12px; }
+.compare-form label {
+	display: flex; flex-direction: column; gap: 6px; font-size: 12px;
+	text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+}
+.compare-form select {
+	padding: 9px 12px; font: inherit; font-size: 14px;
+	border: 1px solid var(--light); border-radius: 9px; outline: none; background: #fff;
+}
+.compare-form select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(22,163,190,.15); }
+.compare-form .btn { cursor: pointer; }
 
 footer {
 	max-width: 1140px; margin: 0 auto; padding: 22px 32px; color: var(--grey);
