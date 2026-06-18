@@ -103,7 +103,15 @@ a:hover { color: var(--teal); }
 	border: 1px solid var(--light); border-radius: 9px; outline: none;
 }
 .toolbar input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(22,163,190,.15); }
-.toolbar .count { color: var(--muted); font-size: 13px; }
+.toolbar .count { color: var(--muted); font-size: 13px; margin-right: auto; }
+.btn {
+	display: inline-block; text-decoration: none; background: var(--teal); color: #fff;
+	border: 1px solid var(--teal); border-radius: 8px; padding: 8px 14px; font-size: 13px;
+	font-weight: 600;
+}
+.btn:hover { background: var(--teal-dark); border-color: var(--teal-dark); color: #fff; }
+.btn-ghost { background: #fff; color: var(--teal-dark); }
+.btn-ghost:hover { background: var(--faint); color: var(--teal-dark); }
 
 /* Tables */
 table.grid {

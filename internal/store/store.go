@@ -307,6 +307,14 @@ func (s *Store) CodeHistory(name string) ([]HistoryPoint, error) {
 	return out, rows.Err()
 }
 
+// BackupTo writes a consistent copy of the database to path (which must not yet
+// exist). Uses VACUUM INTO so it captures committed WAL content safely while the
+// database is open.
+func (s *Store) BackupTo(path string) error {
+	_, err := s.db.Exec(`VACUUM INTO ?`, path)
+	return err
+}
+
 // ArchivedCode is a code's latest-known state across the whole archive, whether
 // or not it still exists in Shopify.
 type ArchivedCode struct {

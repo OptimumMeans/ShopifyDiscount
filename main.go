@@ -97,6 +97,7 @@ pull flags:
 
 serve flags:
   -addr HOST:PORT       Listen address (default "127.0.0.1:8080")
+  -pull-every DURATION  Auto-pull from Shopify on this interval (e.g. 24h) while serving
 `)
 }
 
@@ -290,6 +291,7 @@ func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	dataDir := fs.String("data", "data", "data directory")
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
+	pullEvery := fs.String("pull-every", "", "if set (e.g. 24h), pull from Shopify on this interval while serving")
 	fs.Parse(args)
 
 	st, err := openStore(*dataDir)
@@ -298,12 +300,42 @@ func cmdServe(args []string) error {
 	}
 	defer st.Close()
 
+	if *pullEvery != "" {
+		d, err := time.ParseDuration(*pullEvery)
+		if err != nil {
+			return fmt.Errorf("invalid -pull-every %q: %w", *pullEvery, err)
+		}
+		go autoPull(st, *dataDir, d)
+		fmt.Printf("Auto-pull enabled every %s.\n", d)
+	}
+
 	srv, err := web.New(st, *dataDir)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Dashboard running at http://%s  (Ctrl+C to stop)\n", *addr)
 	return http.ListenAndServe(*addr, srv.Handler())
+}
+
+// autoPull pulls from Shopify on a fixed interval, logging each result. Used by
+// `serve -pull-every`.
+func autoPull(st *store.Store, dataDir string, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for range t.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		res, err := ingest.Pull(ctx, st, dataDir)
+		cancel()
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "auto-pull error:", err)
+		case res.Deduped:
+			fmt.Printf("auto-pull: no changes (snapshot #%d)\n", res.SnapshotID)
+		default:
+			fmt.Printf("auto-pull: snapshot #%d, %d codes, %+d uses since last\n",
+				res.SnapshotID, res.RowCount, res.TotalDelta)
+		}
+	}
 }
 
 func cmdReport(args []string) error {

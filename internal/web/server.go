@@ -4,6 +4,7 @@ package web
 import (
 	"context"
 	"embed"
+	"encoding/csv"
 	"fmt"
 	"html"
 	"html/template"
@@ -47,6 +48,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
 	mux.HandleFunc("GET /archive", s.handleArchive)
+	mux.HandleFunc("GET /backup/db", s.handleBackupDB)
+	mux.HandleFunc("GET /backup/csv", s.handleBackupCSV)
 	mux.HandleFunc("GET /code/{name}", s.handleCode)
 	mux.HandleFunc("POST /pull", s.handlePull)
 	mux.HandleFunc("GET /logo", s.handleLogo)
@@ -287,6 +290,56 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.render(w, "archive.html", d)
+}
+
+// handleBackupDB streams a consistent copy of the SQLite database as a download.
+func (s *Server) handleBackupDB(w http.ResponseWriter, r *http.Request) {
+	f, err := os.CreateTemp("", "discounts-*.db")
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	name := f.Name()
+	f.Close()
+	os.Remove(name) // VACUUM INTO requires the destination not to exist
+	if err := s.st.BackupTo(name); err != nil {
+		httpError(w, err)
+		return
+	}
+	defer os.Remove(name)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="discounts-backup.db"`)
+	http.ServeFile(w, r, name)
+}
+
+// handleBackupCSV exports the full archive (every code ever seen) as a CSV.
+func (s *Server) handleBackupCSV(w http.ResponseWriter, r *http.Request) {
+	codes, err := s.st.AllCodes()
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="discount-archive.csv"`)
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	cw.Write([]string{"Code", "Value", "Value Type", "Status", "Times Used",
+		"Ends", "Usage Limit", "First Seen", "Last Seen", "Snapshots", "State"})
+	for _, c := range codes {
+		state := "Retired"
+		if c.Live {
+			state = "Live"
+		}
+		ends := ""
+		if t, err := time.Parse(time.RFC3339, c.EndAt); err == nil {
+			ends = t.Format("2006-01-02")
+		}
+		cw.Write([]string{
+			c.Name, fmt.Sprintf("%g", c.Value), c.ValueType, c.Status, fmt.Sprintf("%d", c.TimesUsed),
+			ends, c.UsageLimit, c.FirstSeen.Format("2006-01-02"), c.LastSeen.Format("2006-01-02"),
+			fmt.Sprintf("%d", c.Snapshots), state,
+		})
+	}
 }
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
