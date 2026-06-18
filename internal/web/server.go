@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshots)
+	mux.HandleFunc("GET /archive", s.handleArchive)
 	mux.HandleFunc("GET /code/{name}", s.handleCode)
 	mux.HandleFunc("POST /pull", s.handlePull)
 	mux.HandleFunc("GET /logo", s.handleLogo)
@@ -262,6 +263,30 @@ func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+type archiveData struct {
+	Codes   []store.ArchivedCode
+	Total   int
+	Live    int
+	Retired int
+}
+
+func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
+	codes, err := s.st.AllCodes()
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	d := archiveData{Codes: codes, Total: len(codes)}
+	for _, c := range codes {
+		if c.Live {
+			d.Live++
+		} else {
+			d.Retired++
+		}
+	}
+	s.render(w, "archive.html", d)
 }
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {

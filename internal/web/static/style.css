@@ -125,6 +125,8 @@ table.grid tbody tr:hover td { background: var(--faint); }
 .badge.expired { background: var(--light); color: var(--muted); }
 .badge.scheduled { background: #fff7e6; color: #92600a; }
 .badge.new { background: var(--mint); color: #0b5d2e; }
+.badge.live { background: rgba(22,163,190,.14); color: var(--teal-dark); }
+.badge.retired { background: var(--light); color: var(--muted); }
 
 .up { color: var(--up); font-weight: 600; }
 .down { color: var(--down); font-weight: 600; }

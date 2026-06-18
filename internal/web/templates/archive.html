@@ -1,0 +1,55 @@
+{{template "top" .}}
+<h1>Archive</h1>
+<p class="sub">Every code ever recorded — including ones deleted from Shopify. Delete expired codes in your admin; their receipts stay here.</p>
+
+<section class="kpis" style="grid-template-columns:repeat(3,1fr)">
+	<div class="kpi"><span class="num mono">{{.Total}}</span><span class="lbl">Codes on record</span></div>
+	<div class="kpi"><span class="num mono">{{.Live}}</span><span class="lbl">Live in Shopify</span></div>
+	<div class="kpi flat-bar"><span class="num mono">{{.Retired}}</span><span class="lbl">Retired / deleted</span></div>
+</section>
+
+<div class="toolbar">
+	<input id="filter" type="search" placeholder="Filter codes…" autocomplete="off">
+	<span class="count" id="count"></span>
+</div>
+<table class="grid" id="codes">
+	<thead><tr>
+		<th>Code</th><th>Value</th><th class="r">Times used</th><th>Status</th>
+		<th>State</th><th>First seen</th><th>Last seen</th><th class="r">Snapshots</th>
+	</tr></thead>
+	<tbody>
+	{{range .Codes}}
+		<tr>
+			<td><a href="{{codeURL .Name}}">{{.Name}}</a></td>
+			<td>{{if eq .ValueType "percentage"}}{{pct .Value}}{{else if eq .ValueType "fixed_amount"}}${{printf "%g" .Value}}{{else}}{{.ValueType}}{{end}}</td>
+			<td class="r mono">{{.TimesUsed}}</td>
+			<td><span class="badge {{lower .Status}}">{{.Status}}</span></td>
+			<td>{{if .Live}}<span class="badge live">Live</span>{{else}}<span class="badge retired">Retired</span>{{end}}</td>
+			<td>{{day .FirstSeen}}</td>
+			<td>{{day .LastSeen}}</td>
+			<td class="r mono">{{.Snapshots}}</td>
+		</tr>
+	{{end}}
+	</tbody>
+</table>
+
+<script>
+(function () {
+	var input = document.getElementById('filter');
+	var rows = Array.prototype.slice.call(document.querySelectorAll('#codes tbody tr'));
+	var count = document.getElementById('count');
+	function refresh() {
+		var q = input.value.trim().toLowerCase();
+		var shown = 0;
+		rows.forEach(function (r) {
+			var hit = !q || r.cells[0].textContent.toLowerCase().indexOf(q) !== -1;
+			r.style.display = hit ? '' : 'none';
+			if (hit) shown++;
+		});
+		count.textContent = shown + ' of ' + rows.length + ' codes';
+	}
+	input.addEventListener('input', refresh);
+	refresh();
+})();
+</script>
+{{template "bottom" .}}

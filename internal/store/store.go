@@ -307,6 +307,73 @@ func (s *Store) CodeHistory(name string) ([]HistoryPoint, error) {
 	return out, rows.Err()
 }
 
+// ArchivedCode is a code's latest-known state across the whole archive, whether
+// or not it still exists in Shopify.
+type ArchivedCode struct {
+	Name       string
+	Value      float64
+	ValueType  string
+	Status     string
+	TimesUsed  int
+	EndAt      string
+	UsageLimit string
+	FirstSeen  time.Time
+	LastSeen   time.Time
+	Snapshots  int  // how many snapshots contained this code
+	Live       bool // present in the most recent snapshot overall
+}
+
+// AllCodes returns every code ever recorded, each with its most recent known
+// state, sorted by most-recently-seen. Codes deleted from Shopify remain here
+// (marked Live=false) for as long as the local database keeps their snapshots.
+func (s *Store) AllCodes() ([]ArchivedCode, error) {
+	latest, err := s.LatestSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	var latestID int64
+	if latest != nil {
+		latestID = latest.ID
+	}
+
+	rows, err := s.db.Query(`
+SELECT name, value, value_type, status, times_used, end_at, usage_limit,
+       snapshot_id, first_seen, last_seen, snapshots
+FROM (
+  SELECT r.name, r.value, r.value_type, r.status, r.times_used, r.end_at, r.usage_limit,
+    r.snapshot_id,
+    ROW_NUMBER() OVER (PARTITION BY r.name ORDER BY sn.taken_at DESC, sn.id DESC) AS rn,
+    MIN(sn.taken_at) OVER (PARTITION BY r.name) AS first_seen,
+    MAX(sn.taken_at) OVER (PARTITION BY r.name) AS last_seen,
+    COUNT(*)         OVER (PARTITION BY r.name) AS snapshots
+  FROM discount_rows r JOIN snapshots sn ON sn.id = r.snapshot_id
+) t
+WHERE rn = 1
+ORDER BY last_seen DESC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ArchivedCode
+	for rows.Next() {
+		var c ArchivedCode
+		var endAt sql.NullString
+		var snapshotID int64
+		var firstSeen, lastSeen string
+		if err := rows.Scan(&c.Name, &c.Value, &c.ValueType, &c.Status, &c.TimesUsed,
+			&endAt, &c.UsageLimit, &snapshotID, &firstSeen, &lastSeen, &c.Snapshots); err != nil {
+			return nil, err
+		}
+		c.EndAt = endAt.String
+		c.FirstSeen, _ = time.Parse(time.RFC3339, firstSeen)
+		c.LastSeen, _ = time.Parse(time.RFC3339, lastSeen)
+		c.Live = snapshotID == latestID
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // queryRows runs a SELECT returning the standard discount column set.
 func (s *Store) queryRows(query string, args ...any) ([]csvimport.Row, error) {
 	rows, err := s.db.Query(query, args...)
