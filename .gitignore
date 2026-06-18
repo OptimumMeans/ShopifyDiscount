@@ -1,0 +1,25 @@
+# Local data: SQLite database + archived raw CSV exports.
+# This is private store data and must never be committed to the public repo.
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Raw Shopify exports (never commit customer/discount data)
+*.csv
+discounts_export*.csv
+
+# Shopify Admin API credentials — never commit
+shopify.json
+.env
+*.token
+
+# Build output
+/shopifydiscount
+/shopifydiscount.exe
+*.exe
+*.exe~
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

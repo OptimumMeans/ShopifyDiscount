@@ -1,0 +1,31 @@
+{{template "top" .}}
+<p><a href="/">← Dashboard</a></p>
+<h1>{{.Name}}</h1>
+<p class="sub">
+	Currently <span class="badge {{lower .Latest.Status}}">{{.Latest.Status}}</span> ·
+	<strong>{{.Latest.TimesUsed}}</strong> total uses ·
+	{{len .History}} snapshot(s)
+</p>
+
+<div class="sparkbox">
+	{{sparkline .History}}
+	<div class="sparkmeta"><span>min {{.Min}}</span><span>max {{.Max}}</span></div>
+</div>
+
+<h2>Usage history</h2>
+<table class="grid">
+	<thead><tr><th>Snapshot taken</th><th class="r">Times used</th><th class="r">Change</th><th>Status</th></tr></thead>
+	<tbody>
+	{{$prev := -1}}
+	{{range .History}}
+		<tr>
+			<td>{{date .TakenAt}}</td>
+			<td class="r">{{.TimesUsed}}</td>
+			<td class="r">{{if ge $prev 0}}{{delta (sub .TimesUsed $prev)}}{{else}}—{{end}}</td>
+			<td><span class="badge {{lower .Status}}">{{.Status}}</span></td>
+		</tr>
+		{{$prev = .TimesUsed}}
+	{{end}}
+	</tbody>
+</table>
+{{template "bottom" .}}

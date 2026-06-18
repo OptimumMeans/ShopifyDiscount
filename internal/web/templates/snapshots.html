@@ -1,0 +1,22 @@
+{{template "top" .}}
+<h1>Snapshots</h1>
+<p class="sub">Every imported export, newest first.</p>
+{{if not .}}
+	<p>No snapshots imported yet.</p>
+{{else}}
+<table class="grid">
+	<thead><tr><th>#</th><th>Taken</th><th>Imported</th><th class="r">Codes</th><th>Source file</th></tr></thead>
+	<tbody>
+	{{range .}}
+		<tr>
+			<td>{{.ID}}</td>
+			<td>{{date .TakenAt}}</td>
+			<td>{{date .ImportedAt}}</td>
+			<td class="r">{{.RowCount}}</td>
+			<td><code>{{.SourceFile}}</code></td>
+		</tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}
+{{template "bottom" .}}

@@ -1,0 +1,89 @@
+{{template "top" .}}
+{{if not .Latest}}
+	<div class="empty">
+		<h1>No data yet</h1>
+		<p>Pull from Shopify or import an export to get started:</p>
+		<pre>shopifydiscount pull</pre>
+	</div>
+{{else}}
+	<h1>Discount Dashboard</h1>
+	<p class="sub">Latest snapshot <strong>{{date .Latest.TakenAt}}</strong> · {{.Latest.RowCount}} codes · source {{.Latest.SourceFile}}</p>
+
+	<section class="kpis">
+		<div class="kpi"><span class="num mono">{{.Totals.Codes}}</span><span class="lbl">Total codes</span></div>
+		<div class="kpi"><span class="num mono">{{.Totals.TimesUsed}}</span><span class="lbl">Total uses</span></div>
+		<div class="kpi {{if gt .Totals.TotalDelta 0}}accent{{else}}flat-bar{{end}}"><span class="num mono">{{delta .Totals.TotalDelta}}</span><span class="lbl">Uses since last</span></div>
+		<div class="kpi"><span class="num mono">{{.Totals.Active}}</span><span class="lbl">Active</span></div>
+		<div class="kpi flat-bar"><span class="num mono">{{.Totals.Expired}}</span><span class="lbl">Expired</span></div>
+		<div class="kpi accent"><span class="num mono">{{.Totals.WithUsage}}</span><span class="lbl">Codes redeemed</span></div>
+	</section>
+
+	{{if .Disappeared}}
+	<section class="notice">
+		<strong>{{.Totals.Disappeared}} code(s) removed in Shopify since the previous snapshot:</strong>
+		{{range .Disappeared}}<code>{{.}}</code> {{end}}
+	</section>
+	{{end}}
+
+	<h2>Breakdowns</h2>
+	<section class="charts">
+		{{template "donutcard" dict "Title" "By status" "Segs" .ByStatus "Total" .Totals.Codes}}
+		{{template "donutcard" dict "Title" "By class" "Segs" .ByClass "Total" .Totals.Codes}}
+		{{template "donutcard" dict "Title" "By value type" "Segs" .ByValueType "Total" .Totals.Codes}}
+		{{template "donutcard" dict "Title" "Redemption" "Segs" .Redemption "Total" .Totals.Codes}}
+	</section>
+
+	<section class="chart-wide">
+		<div class="chart-card">
+			<h3>Top codes by redemptions</h3>
+			{{bars .TopCodes}}
+		</div>
+	</section>
+
+	<h2>Codes</h2>
+	<div class="toolbar">
+		<input id="filter" type="search" placeholder="Filter codes…" autocomplete="off">
+		<span class="count" id="count"></span>
+	</div>
+	<table class="grid" id="codes">
+		<thead><tr>
+			<th>Code</th><th>Value</th><th>Class</th><th class="r">Times used</th>
+			<th class="r">Since last</th><th>Status</th><th class="r">Limit</th><th>Ends</th>
+		</tr></thead>
+		<tbody>
+		{{range .Discounts}}
+			<tr>
+				<td><a href="{{codeURL .Name}}">{{.Name}}</a>{{if .IsNew}} <span class="badge new">new</span>{{end}}</td>
+				<td>{{if eq .ValueType "percentage"}}{{pct .Value}}{{else if eq .ValueType "fixed_amount"}}${{printf "%g" .Value}}{{else}}{{.Type}}{{end}}</td>
+				<td>{{.DiscountClass}}</td>
+				<td class="r mono">{{.TimesUsed}}</td>
+				<td class="r mono">{{if .HadPrev}}{{delta .Delta}}{{else}}—{{end}}</td>
+				<td><span class="badge {{lower .Status}}">{{.Status}}</span></td>
+				<td class="r mono">{{if .UsageLimit}}{{.UsageLimit}}{{else}}∞{{end}}</td>
+				<td>{{rfcday .EndAt}}</td>
+			</tr>
+		{{end}}
+		</tbody>
+	</table>
+
+	<script>
+	(function () {
+		var input = document.getElementById('filter');
+		var rows = Array.prototype.slice.call(document.querySelectorAll('#codes tbody tr'));
+		var count = document.getElementById('count');
+		function refresh() {
+			var q = input.value.trim().toLowerCase();
+			var shown = 0;
+			rows.forEach(function (r) {
+				var hit = !q || r.cells[0].textContent.toLowerCase().indexOf(q) !== -1;
+				r.style.display = hit ? '' : 'none';
+				if (hit) shown++;
+			});
+			count.textContent = shown + ' of ' + rows.length + ' codes';
+		}
+		input.addEventListener('input', refresh);
+		refresh();
+	})();
+	</script>
+{{end}}
+{{template "bottom" .}}

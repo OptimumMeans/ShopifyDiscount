@@ -1,0 +1,36 @@
+{{define "top"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopify Discount Archive</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+	<a class="brand" href="/">🏷️ Discount Archive</a>
+	<nav>
+		<a href="/">Dashboard</a>
+		<a href="/snapshots">Snapshots</a>
+	</nav>
+</header>
+<main>{{end}}
+
+{{define "donutcard"}}
+<div class="chart-card">
+	<h3>{{.Title}}</h3>
+	<div class="donut-wrap">
+		{{donut .Segs}}
+		<ul class="legend">
+			{{range .Segs}}
+			<li><span class="swatch" style="background:{{.Color}}"></span><span class="legend-label">{{.Label}}</span><span class="legend-val mono">{{.Value}} · {{pctOf .Value $.Total}}</span></li>
+			{{end}}
+		</ul>
+	</div>
+</div>
+{{end}}
+
+{{define "bottom"}}</main>
+<footer>Local archive · data never leaves this machine</footer>
+</body>
+</html>{{end}}
